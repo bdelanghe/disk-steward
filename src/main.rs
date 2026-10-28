@@ -451,7 +451,7 @@ mod tests {
         }
     }
     fn cfg_for(mode: &str, enabled: &str, root: &Path, budget_gb: u64, floor_gb: u64) -> Config {
-        parse_config(&format!("mode={}\nfloor_gb={}\nlsof=/usr/bin/true\nstate_dir={}/state\n[consumer rt]\nkind=rust-target\nenabled={}\nroots={}\nbudget_gb={}\nmin_age_hours=24\n", mode, floor_gb, root.display(), enabled, root.display(), budget_gb))
+        parse_config(&format!("mode={}\nfloor_gb={}\nlsof=true\nstate_dir={}/state\n[consumer rt]\nkind=rust-target\nenabled={}\nroots={}\nbudget_gb={}\nmin_age_hours=24\n", mode, floor_gb, root.display(), enabled, root.display(), budget_gb))
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
         let t = mk_target(&d, "old", 64);
         ageall(&t, 100);
         let mut c = cfg_for("live", "true", &d, 0, 0);
-        c.global.insert("lsof".into(), "/bin/echo".into()); // prints args, non-empty stdout = "open"
+        c.global.insert("lsof".into(), "echo".into()); // prints args, non-empty stdout = "open"
         let _ = run_cfg(&c);
         assert!(t.exists());
     }
