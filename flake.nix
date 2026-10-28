@@ -25,6 +25,7 @@
           cargoLock.lockFile = ./Cargo.lock;
           doCheck = true; # the 9 unit tests: dry-run, enabled gating, recency, .git, open files, budget, rotation, age, undeclared
           meta.mainProgram = "disk-steward";
+          meta.license = lib.licenses.mit;
         };
         default = disk-steward;
       });

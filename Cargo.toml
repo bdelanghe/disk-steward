@@ -3,6 +3,7 @@ name = "disk-steward"
 version = "0.1.0"
 edition = "2021"
 description = "Host disk steward: keeps free space above a floor by sweeping declared consumers (dry-run by default)."
+license = "MIT"
 
 [dependencies]
 
