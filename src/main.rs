@@ -274,6 +274,8 @@ fn sweep_age(r: &Run, c: &Consumer) -> Row {
     let (mut size, mut old, mut oldb, mut gone) = (0u64, 0u64, 0u64, 0u64);
     let mut stack = vec![PathBuf::from(c.s("path").unwrap_or(""))];
     while let Some(d) = stack.pop() {
+        // Never walk into a git checkout (a dir holding .git) or a .git dir: deleting old objects corrupts the repo.
+        if d.file_name().map_or(false, |n| n == ".git") || d.join(".git").exists() { continue; }
         let rd = match fs::read_dir(&d) { Ok(r) => r, Err(_) => continue };
         for e in rd.flatten() {
             let md = match fs::symlink_metadata(e.path()) { Ok(m) => m, Err(_) => continue };
@@ -547,6 +549,24 @@ mod tests {
         let c = parse_config(&format!("mode=live\nstate_dir={}/st\n[consumer cap]\nkind=age-files\nenabled=true\npath={}\nmax_age_days=7\n", d.display(), d.display()));
         let _ = run_cfg(&c);
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn age_files_never_touch_git_checkouts() {
+        let d = tmp("agegit");
+        let repo = d.join("repo");
+        fs::create_dir_all(repo.join(".git/objects")).unwrap();
+        let obj = repo.join(".git/objects/pack");
+        let tracked = repo.join("tracked.txt");
+        let loose = d.join("old.json");
+        for f in [&obj, &tracked, &loose] {
+            fs::write(f, "x").unwrap();
+            age(f, 24 * 30);
+        }
+        let c = parse_config(&format!("mode=live\nstate_dir={}/st\n[consumer cap]\nkind=age-files\nenabled=true\npath={}\nmax_age_days=7\n", d.display(), d.display()));
+        let _ = run_cfg(&c);
+        assert!(!loose.exists(), "an old file outside a checkout still goes");
+        assert!(obj.exists() && tracked.exists(), "a dir holding .git must stay whole");
     }
 
     #[test]
