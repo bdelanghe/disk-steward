@@ -359,7 +359,7 @@ fn json_esc(s: &str) -> String {
 fn json(free: Option<u64>, floor: u64, live: bool, rows: &[Row], und: &[(String, u64)], now: u64) -> String {
     let r: Vec<String> = rows.iter().map(|r| format!("{{\"name\":\"{}\",\"kind\":\"{}\",\"enabled\":{},\"size_bytes\":{},\"budget_bytes\":{},\"action\":\"{}\"}}", json_esc(&r.name), r.kind, r.enabled, r.size, r.budget, json_esc(&r.action))).collect();
     let u: Vec<String> = und.iter().map(|(p, b)| format!("{{\"path\":\"{}\",\"size_bytes\":{}}}", json_esc(p), b)).collect();
-    format!("{{\"at\":{},\"mode\":\"{}\",\"free_bytes\":{},\"floor_bytes\":{},\"below_floor\":{},\"consumers\":[{}],\"undeclared\":[{}]}}\n", now, if live { "live" } else { "dry-run" }, free.map_or("null".to_string(), |f| f.to_string()), floor, free.map_or(false, |f| f < floor), r.join(","), u.join(","))
+    format!("{{\"at\":{},\"mode\":\"{}\",\"free_bytes\":{},\"floor_bytes\":{},\"below_floor\":{},\"consumers\":[{}],\"undeclared\":[{}]}}\n", now, if live { "live" } else { "dry-run" }, free.map_or("null".to_string(), |f| f.to_string()), floor, free.map_or("null".to_string(), |f| (f < floor).to_string()), r.join(","), u.join(","))
 }
 
 fn run_cfg(cfg: &Config) -> (String, bool) {
@@ -562,6 +562,7 @@ mod tests {
         assert!(!below);
         let j = fs::read_to_string(d.join("st/report.json")).unwrap();
         assert!(j.contains("\"free_bytes\":null"), "{}", j);
+        assert!(j.contains("\"below_floor\":null"), "{}", j);
     }
 
     #[test]
