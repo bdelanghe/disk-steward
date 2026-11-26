@@ -205,7 +205,8 @@ fn rotate_log(path: &Path, keep: u64, live: bool) -> String {
 
 struct Run<'a> {
     cfg: &'a Config,
-    free: u64,
+    /// None when `df` could not measure the volume: then only budgets drive deletion, never the floor.
+    free: Option<u64>,
     floor: u64,
     now: SystemTime,
 }
@@ -222,7 +223,7 @@ fn sweep_targets(r: &Run, c: &Consumer) -> Row {
     }
     let mut items: Vec<(PathBuf, u64, SystemTime)> = found.into_iter().map(|p| { let (b, t) = tree_stats(&p); (p, b, t) }).collect();
     let total: u64 = items.iter().map(|i| i.1).sum();
-    let over = total > budget || r.free < r.floor;
+    let over = total > budget || r.free.map_or(false, |f| f < r.floor);
     let mut action = format!("{} targets", items.len());
     if over {
         items.sort_by_key(|i| i.2); // oldest first
@@ -230,7 +231,7 @@ fn sweep_targets(r: &Run, c: &Consumer) -> Row {
         let mut done = 0;
         let mut freed = 0u64;
         for (p, b, newest) in &items {
-            if cur <= budget && r.free + freed >= r.floor {
+            if cur <= budget && r.free.map_or(true, |f| f.saturating_add(freed) >= r.floor) {
                 break;
             }
             let age = r.now.duration_since(*newest).unwrap_or(Duration::ZERO);
@@ -299,11 +300,11 @@ fn watch(c: &Consumer) -> Row {
     Row { name: c.name.clone(), kind: "watch".into(), enabled: false, size, budget, action: action.into() }
 }
 
-fn nix_gc(r: &Run, c: &Consumer, free_now: u64) -> Row {
+fn nix_gc(r: &Run, c: &Consumer, free_now: Option<u64>) -> Row {
     let days = c.n("keep_days", 14);
     let live = r.cfg.live() && c.enabled();
-    let need = free_now < r.floor;
-    let action = if !need { "free space above floor, not run".to_string() } else if !live { format!("would run nix-collect-garbage --delete-older-than {}d", days) } else {
+    let need = free_now.map_or(false, |f| f < r.floor);
+    let action = if free_now.is_none() { "free space unknown, not run".to_string() } else if !need { "free space above floor, not run".to_string() } else if !live { format!("would run nix-collect-garbage --delete-older-than {}d", days) } else {
         let bin = c.s("bin").unwrap_or("nix-collect-garbage");
         match Command::new(bin).arg("--delete-older-than").arg(format!("{}d", days)).output() {
             Ok(o) if o.status.success() => format!("ran nix-collect-garbage --delete-older-than {}d", days),
@@ -338,8 +339,9 @@ fn undeclared(cfg: &Config, threshold: u64) -> Vec<(String, u64)> {
     out
 }
 
-fn table(free: u64, floor: u64, live: bool, rows: &[Row], und: &[(String, u64)]) -> String {
-    let mut t = format!("disk-steward {} free {} GB floor {} GB\n", if live { "LIVE" } else { "DRY-RUN" }, gb(free), gb(floor));
+fn table(free: Option<u64>, floor: u64, live: bool, rows: &[Row], und: &[(String, u64)]) -> String {
+    let free = free.map_or("unknown".to_string(), |f| format!("{} GB", gb(f)));
+    let mut t = format!("disk-steward {} free {} floor {} GB\n", if live { "LIVE" } else { "DRY-RUN" }, free, gb(floor));
     t.push_str("consumer | kind | enabled | size GB | budget GB | action\n");
     for r in rows {
         t.push_str(&format!("{} | {} | {} | {} | {} | {}\n", r.name, r.kind, r.enabled, gb(r.size), gb(r.budget), r.action));
@@ -354,17 +356,17 @@ fn json_esc(s: &str) -> String {
     s.chars().map(|c| match c { '"' => "\\\"".to_string(), '\\' => "\\\\".to_string(), c if (c as u32) < 32 => " ".to_string(), c => c.to_string() }).collect()
 }
 
-fn json(free: u64, floor: u64, live: bool, rows: &[Row], und: &[(String, u64)], now: u64) -> String {
+fn json(free: Option<u64>, floor: u64, live: bool, rows: &[Row], und: &[(String, u64)], now: u64) -> String {
     let r: Vec<String> = rows.iter().map(|r| format!("{{\"name\":\"{}\",\"kind\":\"{}\",\"enabled\":{},\"size_bytes\":{},\"budget_bytes\":{},\"action\":\"{}\"}}", json_esc(&r.name), r.kind, r.enabled, r.size, r.budget, json_esc(&r.action))).collect();
     let u: Vec<String> = und.iter().map(|(p, b)| format!("{{\"path\":\"{}\",\"size_bytes\":{}}}", json_esc(p), b)).collect();
-    format!("{{\"at\":{},\"mode\":\"{}\",\"free_bytes\":{},\"floor_bytes\":{},\"below_floor\":{},\"consumers\":[{}],\"undeclared\":[{}]}}\n", now, if live { "live" } else { "dry-run" }, free, floor, free < floor, r.join(","), u.join(","))
+    format!("{{\"at\":{},\"mode\":\"{}\",\"free_bytes\":{},\"floor_bytes\":{},\"below_floor\":{},\"consumers\":[{}],\"undeclared\":[{}]}}\n", now, if live { "live" } else { "dry-run" }, free.map_or("null".to_string(), |f| f.to_string()), floor, free.map_or(false, |f| f < floor), r.join(","), u.join(","))
 }
 
 fn run_cfg(cfg: &Config) -> (String, bool) {
     let now = SystemTime::now();
     let vol = cfg.g("volume").unwrap_or("/System/Volumes/Data");
     let floor = cfg.gn("floor_gb", 150) * GB;
-    let free0 = free_bytes(vol).unwrap_or(u64::MAX);
+    let free0 = free_bytes(vol);
     let r = Run { cfg, free: free0, floor, now };
     let order = ["logs", "rust-target", "age-files", "watch", "nix-gc"];
     let mut rows = Vec::new();
@@ -375,12 +377,13 @@ fn run_cfg(cfg: &Config) -> (String, bool) {
                 "rust-target" => sweep_targets(&r, c),
                 "age-files" => sweep_age(&r, c),
                 "watch" => watch(c),
-                _ => { let f = free_bytes(vol).unwrap_or(free0); nix_gc(&r, c, f) }
+                _ => { let f = free_bytes(vol).or(free0); nix_gc(&r, c, f) }
             });
         }
     }
     let und = undeclared(cfg, cfg.gn("undeclared_gb", 5) * GB);
-    let free = free_bytes(vol).unwrap_or(free0);
+    let free = free_bytes(vol).or(free0);
+    let below = free.map_or(false, |f| f < floor);
     let epoch = now.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let sd = PathBuf::from(cfg.g("state_dir").unwrap_or("."));
     let _ = fs::create_dir_all(&sd);
@@ -388,23 +391,24 @@ fn run_cfg(cfg: &Config) -> (String, bool) {
     let _ = fs::write(sd.join("report.txt"), &t);
     let _ = fs::write(sd.join("report.json"), json(free, floor, cfg.live(), &rows, &und, epoch));
     // One contentless pointer per incident: sent on the first run below the floor, re-armed when free space recovers.
+    // Unknown free space neither raises nor clears an incident.
     let flag = sd.join("incident");
-    if free < floor {
+    if below {
         if !flag.exists() {
             if let Some(n) = cfg.g("ntfy") {
                 let ok = Command::new(n).args(["push", "-t", "DATA home stalled", "host disk below the floor, see the fleet map"]).output().map(|o| o.status.success()).unwrap_or(false);
                 if ok { let _ = fs::write(&flag, ""); }
             }
         }
-    } else {
+    } else if free.is_some() {
         let _ = fs::remove_file(&flag);
     }
     // Report to chitin (best effort: the topic schema is the router's, a refusal is logged not fatal).
     if let (Some(ch), Some(who)) = (cfg.g("chitin"), cfg.g("chitin_as")) {
-        let subj = format!("free {} GB floor {} GB {}", gb(free), gb(floor), if cfg.live() { "live" } else { "dry-run" });
+        let subj = format!("free {} floor {} GB {}", free.map_or("unknown".to_string(), |f| format!("{} GB", gb(f))), gb(floor), if cfg.live() { "live" } else { "dry-run" });
         let _ = Command::new(ch).args(["publish", "--as", who, "disk.report", "report", &subj]).output();
     }
-    (t, free < floor)
+    (t, below)
 }
 
 fn main() {
@@ -547,6 +551,17 @@ mod tests {
         let c = parse_config(&format!("mode=live\nstate_dir={}/st\n[consumer cap]\nkind=age-files\nenabled=true\npath={}\nmax_age_days=7\n", d.display(), d.display()));
         let _ = run_cfg(&c);
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn unmeasurable_free_space_is_reported_unknown_not_infinite() {
+        let d = tmp("nodf");
+        let c = parse_config(&format!("mode=dry-run\nvolume={}/no-such-volume\nstate_dir={}/st\n", d.display(), d.display()));
+        let (t, below) = run_cfg(&c);
+        assert!(t.starts_with("disk-steward DRY-RUN free unknown floor"), "{}", t);
+        assert!(!below);
+        let j = fs::read_to_string(d.join("st/report.json")).unwrap();
+        assert!(j.contains("\"free_bytes\":null"), "{}", j);
     }
 
     #[test]
